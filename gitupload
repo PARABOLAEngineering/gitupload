@@ -1,0 +1,100 @@
+
+#!/usr/bin/env bash
+#
+# gitupload - Quietly stage, commit, and push a directory.
+#
+# Usage:
+#   gitupload .
+#   gitupload ./src "Update calculation engine"
+
+set -Eeuo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+RESET='\033[0m'
+
+info()    { printf "${CYAN}==>${RESET} %s\n" "$*"; }
+success() { printf "${GREEN}✓${RESET} %s\n" "$*"; }
+error()   { printf "${RED}✗${RESET} %s\n" "$*" >&2; exit 1; }
+
+quiet_git() {
+    local output
+    if output=$(git "$@" 2>&1); then
+        return 0
+    else
+        local status=$?
+        error "Git command failed: git $*
+$output"
+    fi
+}
+
+[[ $# -ge 1 ]] || error "Usage: gitupload <directory> [commit message]"
+
+TARGET="$1"
+MESSAGE="${2:-}"
+
+[[ -d "$TARGET" ]] || error "Directory does not exist: $TARGET"
+
+TARGET="$(cd "$TARGET" && pwd -P)"
+
+ROOT="$(git -C "$TARGET" rev-parse --show-toplevel 2>/dev/null)" \
+    || error "No Git repository found."
+
+TARGET_REL="$(realpath --relative-to="$ROOT" "$TARGET")"
+
+[[ "$TARGET_REL" != ".." && "$TARGET_REL" != ../* ]] \
+    || error "Target is outside the repository."
+
+cd "$ROOT"
+
+BRANCH="$(git symbolic-ref --short HEAD 2>/dev/null)" \
+    || error "Detached HEAD."
+
+info "Repository: $(basename "$ROOT")"
+info "Branch: $BRANCH"
+
+# Stage
+if [[ "$TARGET_REL" == "." ]]; then
+    quiet_git add -A
+else
+    quiet_git add -A -- "$TARGET_REL"
+fi
+
+# Check staged changes
+if git diff --cached --quiet; then
+    info "Nothing to commit."
+    exit 0
+fi
+
+# Commit message
+MESSAGE="${MESSAGE:-Update $(basename "$TARGET") - $(date '+%Y-%m-%d %H:%M')}"
+
+info "Committing: $MESSAGE"
+
+read -r -p "Proceed? [Y/n] " CONFIRM
+CONFIRM="${CONFIRM:-Y}"
+
+[[ "$CONFIRM" =~ ^[Yy]$ ]] || {
+    info "Cancelled."
+    exit 0
+}
+
+quiet_git commit -m "$MESSAGE"
+success "Committed."
+
+# Remote
+REMOTE="$(git config --get "branch.$BRANCH.remote" || true)"
+REMOTE="${REMOTE:-$(git remote | head -n 1)}"
+
+[[ -n "$REMOTE" ]] || error "No Git remote configured."
+
+info "Pushing..."
+
+if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
+    quiet_git push
+else
+    quiet_git push -u "$REMOTE" "$BRANCH"
+fi
+
+success "Upload complete."
